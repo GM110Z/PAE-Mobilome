@@ -6,3 +6,6 @@
 
 **MakeClinkerGroups.sh**. Uses dereplicated picis output from *mash-derep.sh script* and the mash matrix to group gbff files in groups that have a set similarity so they look decent on Clinker
 ./makeClinkGroups.sh summaryclust.tsv pici_mash_all_vs_all.tsv outfolder mash_distance_of_choice
+
+
+**fetch-strain-name.sh** Uses a list of nuccore ID to fetch strain name.Run as *fetch-strain-name.sh id_file.txt*
