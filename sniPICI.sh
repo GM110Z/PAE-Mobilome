@@ -1,139 +1,201 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
+"""
 
-# ==========================================================
-# sniPICI.sh
-#
-# Extract predicted PICI loci as mini-GBFF files
-# Supports:
-#   - single-record complete genomes
-#   - multi-contig draft genomes
-#   - warns if first_hit / last_hit are on different contigs
-#
-# Input:
-#   pici_systems_summary.tsv
-#   matching *.gbff
-#
-# Output:
-#   pici_gbff_regions/
-#      *.gbff
-#      extraction_summary.tsv
-# ==========================================================
+Usage:
+    python3 02_extract_pici_regions.py \
+        --summary pici_systems_summary.tsv \
+        --gbff_dir /path/to/gbff_files \
+        --outdir pici_gbff_regions \
+        --flank 5
+"""
 
-SUMMARY="pici_systems_summary.tsv"
-OUTDIR="pici_gbff_regions"
-FLANK=3
-
-mkdir -p "$OUTDIR"
-
-python3 <<'PY'
-import csv, os
+import argparse
+import csv
+import os
+import sys
+from pathlib import Path
 from Bio import SeqIO
 
-summary = "pici_systems_summary.tsv"
-outdir  = "pici_gbff_regions"
-flank   = 3
+# ── argument parsing ──────────────────────────────────────────────────────────
 
-os.makedirs(outdir, exist_ok=True)
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--summary",  default="pici_systems_summary.tsv",
+                   help="Output of 01_build_pici_summary.sh")
+    p.add_argument("--gbff_dir", default=".",
+                   help="Directory containing .gbff files (searched recursively)")
+    p.add_argument("--outdir",   default="pici_gbff_regions")
+    p.add_argument("--flank",    type=int, default=5,
+                   help="CDS units to add upstream/downstream (default: 5)")
+    return p.parse_args()
 
-sumfile = open(f"{outdir}/extraction_summary.tsv", "w")
-sumfile.write(
-    "Genome\tsys_id\tstatus\tcontig\tfirst_hit\tlast_hit\t"
-    "cds_start\tcds_end\tbp_start\tbp_end\tn_cds\toutfile\n"
-)
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-with open(summary) as fh:
-    reader = csv.DictReader(fh, delimiter="\t")
+def find_gbff(gbff_dir: str, genome: str) -> Path | None:
+    """Search for a GBFF file matching the genome accession."""
+    root = Path(gbff_dir)
+    # Try common naming patterns
+    for suffix in [".gbff", ".gbk", ".gb", "_genomic.gbff"]:
+        for candidate in root.rglob(f"*{genome}*{suffix}"):
+            return candidate
+    return None
 
-    for row in reader:
 
-        genome = row["Genome"].replace(".g.fasta","")
-        sysid  = row["sys_id"]
+def build_protein_index(records):
+    """
+    Return dict: protein_id -> (record, cds_list, cds_index)
+    Indexes ALL CDS across ALL contigs in one pass.
+    """
+    index = {}
+    for rec in records:
+        cds = [f for f in rec.features if f.type == "CDS"]
+        for i, f in enumerate(cds):
+            pid = f.qualifiers.get("protein_id", [""])[0]
+            if pid:
+                index[pid] = (rec, cds, i)
+    return index
 
-        gbff = genome + ".gbff"
 
-        if not os.path.exists(gbff):
-            print("Missing:", gbff)
-            continue
+def extract_region(rec, cds_list, idx_start, idx_end, flank):
+    """
+    Slice a SeqRecord around CDS[idx_start:idx_end], adding flank CDS
+    on each side. Uses SeqRecord slicing to avoid private _shift calls.
+    Returns (sub_record, bp_start, bp_end, n_cds).
+    """
+    s = max(0, idx_start - flank)
+    e = min(len(cds_list) - 1, idx_end + flank)
+    chosen = cds_list[s : e + 1]
 
-        first_hit = row["first_hit"]
-        last_hit  = row["last_hit"]
+    bp_start = min(int(f.location.start) for f in chosen)
+    bp_end   = max(int(f.location.end)   for f in chosen)
 
-        try:
-            records = list(SeqIO.parse(gbff, "genbank"))
-        except Exception as e:
-            print("Cannot read", gbff, e)
-            continue
+    # SeqRecord slicing correctly shifts all feature coordinates
+    sub = rec[bp_start:bp_end]
+    sub.annotations["molecule_type"] = "DNA"
+    sub.id          = rec.id
+    sub.name        = rec.name
+    sub.description = rec.description
 
-        found_first = None
-        found_last  = None
+    return sub, bp_start, bp_end, len(chosen)
 
-        # search every contig
-        for rec in records:
 
-            cds = [f for f in rec.features if f.type == "CDS"]
+# ── main ──────────────────────────────────────────────────────────────────────
 
-            for i, f in enumerate(cds):
-                pid = f.qualifiers.get("protein_id", [""])[0]
+def main():
+    args = parse_args()
+    os.makedirs(args.outdir, exist_ok=True)
 
-                if pid == first_hit and found_first is None:
-                    found_first = (rec, cds, i)
+    log_path = os.path.join(args.outdir, "extraction_summary.tsv")
+    log = open(log_path, "w")
+    log.write(
+        "Genome\tsys_id\tstatus\tcontig\t"
+        "first_hit\tlast_hit\t"
+        "cds_start_idx\tcds_end_idx\t"
+        "bp_start\tbp_end\tbp_length\tn_cds\toutfile\n"
+    )
 
-                if pid == last_hit and found_last is None:
-                    found_last = (rec, cds, i)
+    ok_count = fail_count = split_count = 0
 
-        if found_first is None or found_last is None:
-            print("Protein match failed:", genome, first_hit, last_hit)
-            continue
+    with open(args.summary) as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            genome    = row["Genome"]
+            sys_id    = row["sys_id"]
+            first_hit = row["first_hit"]
+            last_hit  = row["last_hit"]
 
-        rec1, cds1, idx1 = found_first
-        rec2, cds2, idx2 = found_last
+            # ── locate GBFF ──────────────────────────────────────────────────
+            gbff_path = find_gbff(args.gbff_dir, genome)
+            if gbff_path is None:
+                print(f"[MISSING GBFF] {genome}", file=sys.stderr)
+                log.write(f"{genome}\t{sys_id}\tMISSING_GBFF\tNA\t"
+                          f"{first_hit}\t{last_hit}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n")
+                fail_count += 1
+                continue
 
-        # hits on different contigs
-        if rec1.id != rec2.id:
-            print("Different contigs:", genome, first_hit, last_hit)
-            sumfile.write(
-                f"{genome}\t{sysid}\tDIFFERENT_CONTIGS\tNA\t"
-                f"{first_hit}\t{last_hit}\tNA\tNA\tNA\tNA\tNA\tNA\n"
-            )
-            continue
+            try:
+                records = list(SeqIO.parse(str(gbff_path), "genbank"))
+            except Exception as exc:
+                print(f"[PARSE ERROR] {gbff_path}: {exc}", file=sys.stderr)
+                fail_count += 1
+                continue
 
-        rec = rec1
-        cds = cds1
+            # ── build protein index ──────────────────────────────────────────
+            prot_index = build_protein_index(records)
 
-        if idx1 > idx2:
-            idx1, idx2 = idx2, idx1
-            first_hit, last_hit = last_hit, first_hit
+            hit1 = prot_index.get(first_hit)
+            hit2 = prot_index.get(last_hit)
 
-        s = max(0, idx1 - flank)
-        e = min(len(cds)-1, idx2 + flank)
+            if hit1 is None or hit2 is None:
+                missing = [h for h, v in [(first_hit, hit1), (last_hit, hit2)] if v is None]
+                print(f"[PROTEIN NOT FOUND] {genome} {sys_id}: {missing}", file=sys.stderr)
+                log.write(f"{genome}\t{sys_id}\tPROTEIN_NOT_FOUND\tNA\t"
+                          f"{first_hit}\t{last_hit}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n")
+                fail_count += 1
+                continue
 
-        chosen = cds[s:e+1]
+            rec1, cds1, idx1 = hit1
+            rec2, cds2, idx2 = hit2
 
-        bp_start = min(int(f.location.start) for f in chosen)
-        bp_end   = max(int(f.location.end) for f in chosen)
+            # ── same contig: normal extraction ───────────────────────────────
+            if rec1.id == rec2.id:
+                if idx1 > idx2:
+                    idx1, idx2 = idx2, idx1
+                    first_hit, last_hit = last_hit, first_hit
 
-        sub = rec[bp_start:bp_end]
+                sub, bp_start, bp_end, n_cds = extract_region(
+                    rec1, cds1, idx1, idx2, args.flank
+                )
+                sub.description += f" | {sys_id} predicted PICI region"
 
-        new_feats = []
-        for f in chosen:
-            nf = f._shift(-bp_start)
-            new_feats.append(nf)
+                outfile = os.path.join(args.outdir, f"{genome}_{sys_id}.gbff")
+                SeqIO.write(sub, outfile, "genbank")
 
-        sub.features = new_feats
-        sub.annotations["molecule_type"] = "DNA"
-        sub.id = rec.id
-        sub.name = rec.name
-        sub.description = f"{rec.description} | {sysid} predicted PICI region"
+                log.write(
+                    f"{genome}\t{sys_id}\tOK\t{rec1.id}\t"
+                    f"{first_hit}\t{last_hit}\t"
+                    f"{idx1+1}\t{idx2+1}\t"
+                    f"{bp_start+1}\t{bp_end}\t{bp_end - bp_start}\t{n_cds}\t{outfile}\n"
+                )
+                ok_count += 1
 
-        outfile = f"{outdir}/{genome}_{sysid}.gbff"
+            # ── different contigs: extract each separately ───────────────────
+            else:
+                print(f"[SPLIT CONTIGS] {genome} {sys_id}: "
+                      f"{rec1.id} / {rec2.id}", file=sys.stderr)
+                split_count += 1
 
-        SeqIO.write(sub, outfile, "genbank")
+                for label, (rec, cds, idx) in [
+                    ("partA", (rec1, cds1, idx1)),
+                    ("partB", (rec2, cds2, idx2)),
+                ]:
+                    sub, bp_start, bp_end, n_cds = extract_region(
+                        rec, cds, idx, idx, args.flank
+                    )
+                    sub.description += (
+                        f" | {sys_id} predicted PICI region "
+                        f"[SPLIT {label}]"
+                    )
+                    outfile = os.path.join(
+                        args.outdir, f"{genome}_{sys_id}_{label}.gbff"
+                    )
+                    SeqIO.write(sub, outfile, "genbank")
 
-        sumfile.write(
-            f"{genome}\t{sysid}\tOK\t{rec.id}\t{first_hit}\t{last_hit}\t"
-            f"{s+1}\t{e+1}\t{bp_start+1}\t{bp_end}\t{len(chosen)}\t{outfile}\n"
-        )
+                    log.write(
+                        f"{genome}\t{sys_id}\tSPLIT_{label}\t{rec.id}\t"
+                        f"{first_hit}\t{last_hit}\t"
+                        f"{idx+1}\t{idx+1}\t"
+                        f"{bp_start+1}\t{bp_end}\t{bp_end - bp_start}\t{n_cds}\t{outfile}\n"
+                    )
 
-sumfile.close()
-print("Done.")
-PY
+    log.close()
+
+    print(f"\nDone.")
+    print(f"  OK (same contig):   {ok_count}")
+    print(f"  Split (diff contig):{split_count}")
+    print(f"  Failed:             {fail_count}")
+    print(f"  Log: {log_path}")
+
+
+if __name__ == "__main__":
+    main()
