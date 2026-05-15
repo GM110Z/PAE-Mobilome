@@ -34,9 +34,15 @@ def parse_args():
 def find_gbff(gbff_dir: str, genome: str) -> Path | None:
     """Search for a GBFF file matching the genome accession."""
     root = Path(gbff_dir)
-    # Try common naming patterns
+    # Strip suffixes left by the bash summary script
+    clean = genome
+    for strip in [".g.fasta", ".fasta", ".fa", ".fna"]:
+        if clean.endswith(strip):
+            clean = clean[: -len(strip)]
+            break
+    # Try common naming patterns with cleaned accession
     for suffix in [".gbff", ".gbk", ".gb", "_genomic.gbff"]:
-        for candidate in root.rglob(f"*{genome}*{suffix}"):
+        for candidate in root.rglob(f"*{clean}*{suffix}"):
             return candidate
     return None
 
@@ -99,15 +105,22 @@ def main():
     with open(args.summary) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         for row in reader:
-            genome    = row["Genome"]
-            sys_id    = row["sys_id"]
-            first_hit = row["first_hit"]
-            last_hit  = row["last_hit"]
+            genome_raw = row["Genome"]
+            sys_id     = row["sys_id"]
+            first_hit  = row["first_hit"]
+            last_hit   = row["last_hit"]
+
+            # Strip .g.fasta / .fasta suffixes left in summary by bash script
+            genome = genome_raw
+            for strip in [".g.fasta", ".fasta", ".fa", ".fna"]:
+                if genome.endswith(strip):
+                    genome = genome[: -len(strip)]
+                    break
 
             # ── locate GBFF ──────────────────────────────────────────────────
             gbff_path = find_gbff(args.gbff_dir, genome)
             if gbff_path is None:
-                print(f"[MISSING GBFF] {genome}", file=sys.stderr)
+                print(f"[MISSING GBFF] {genome} (from summary: {genome_raw})", file=sys.stderr)
                 log.write(f"{genome}\t{sys_id}\tMISSING_GBFF\tNA\t"
                           f"{first_hit}\t{last_hit}\tNA\tNA\tNA\tNA\tNA\tNA\tNA\n")
                 fail_count += 1
