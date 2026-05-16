@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 pici_annotate_and_classify.py
@@ -10,7 +11,6 @@ For each extracted PICI GBFF region:
   5. Draw a gene schematic with module colour coding
   6. Write per-group annotation TSVs
   7. Write a master summary TSV (one row per element) for downstream analysis
-
 """
 
 import argparse
