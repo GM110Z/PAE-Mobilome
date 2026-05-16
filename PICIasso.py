@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 pici_annotate_and_classify.py
@@ -121,10 +120,58 @@ ARCHITECTURE_RULES = [
      {"integrase", "regulator"},
      {"replication", "putative_replication", "terminase", "capsid", "mobilisation"}),
 
+    # ── Integrase + capsid only (no replication or regulator) ────────────────
+    ("integrase_capsid_only",
+     {"integrase", "capsid"},
+     {"regulator", "replication", "putative_replication", "terminase", "mobilisation"}),
+
+    # ── Integrase + putative replication only ─────────────────────────────────
+    ("minimal_or_relic",
+     {"integrase", "putative_replication"},
+     {"regulator", "replication", "terminase", "capsid", "mobilisation"}),
+
+    # ── Integrase + replication only ──────────────────────────────────────────
+    ("minimal_or_relic",
+     {"integrase", "replication"},
+     {"regulator", "terminase", "capsid", "mobilisation"}),
+
     # ── Minimal/relic ─────────────────────────────────────────────────────────
     ("minimal_or_relic",
      {"integrase"},
      {"regulator", "replication", "putative_replication", "terminase", "capsid"}),
+
+    # ── Integrase-free classes ────────────────────────────────────────────────
+    ("no_integrase_packaging",
+     {"capsid", "terminase", "replication"},
+     {"integrase"}),
+    ("no_integrase_packaging",
+     {"capsid", "terminase"},
+     {"integrase"}),
+    ("no_integrase_packaging",
+     {"capsid"},
+     {"integrase", "terminase"}),
+    ("no_integrase_replication",
+     {"replication", "regulator", "terminase"},
+     {"integrase", "capsid"}),
+    ("no_integrase_replication",
+     {"replication", "regulator"},
+     {"integrase", "terminase", "capsid", "mobilisation"}),
+    ("no_integrase_replication",
+     {"putative_replication", "regulator"},
+     {"integrase", "terminase", "capsid", "mobilisation"}),
+    ("no_integrase_replication",
+     {"replication"},
+     {"integrase", "terminase", "capsid"}),
+    ("no_integrase_mobilisation",
+     {"mobilisation", "replication"},
+     {"integrase", "terminase", "capsid"}),
+    ("no_integrase_mobilisation",
+     {"mobilisation"},
+     {"integrase", "terminase", "capsid"}),
+    ("no_integrase_regulator_only",
+     {"regulator"},
+     {"integrase", "replication", "putative_replication", "terminase",
+      "capsid", "mobilisation"}),
 
     # ── Catch-all ─────────────────────────────────────────────────────────────
     ("partial_unclear",
@@ -259,45 +306,55 @@ def classify_gene(product: str, pfam_desc: str = None) -> str:
     if any(k in combined for k in mob_kws):
         return "mobilisation"
 
-    # 2. Exclude DNA repair
+    # 2. Integrase — check BEFORE repair exclusion because resolvase/recombinase
+    #    pfam hits would otherwise block legitimate integrases
+    int_kws = ["integrase", "tyrosine recombinase", "serine recombinase",
+               "site-specific recombinase", "site-specific integrase",
+               "recombinase family",
+               "tyrosine-type recombinase",
+               "phage integrase",
+               "xer recombinase",
+               "lambda integrase"]
+    int_pfam_kws = ["phage integrase", "integrase core", "lambda integrase",
+                    "xerc", "xerd"]
+    # NOTE: removed alpA from integrase pfam keywords — AlpA is a regulator
+    if any(k in pl for k in int_kws):
+        return "integrase"
+    if any(k in fl for k in int_pfam_kws):
+        return "integrase"
+
+    # 3. Exclude DNA repair (after integrase check so recombinase family isn't blocked)
     repair_kws = ["glycosylase", "dna repair", "excision repair",
-                  "endonuclease", "resolvase", "recombination protein"]
+                  "endonuclease", "recombination protein"]
+    # NOTE: removed "resolvase" from repair exclusion — resolvase pfam hits
+    # on recombinase family proteins were blocking integrase detection
     if any(k in fl for k in repair_kws):
         return "other"
 
-    # 3. Replication (product name takes priority over pfam)
+    # 4. Replication (product name takes priority over pfam)
     rep_kws = ["replication protein", "replicase", "primase",
                "replication initiator", "replication factor",
                "rep protein", "repa", "dna replication",
-               "replicative dna helicase",       # caught as other before
-               "helicase repa",                  # RepA family helicases
-               "dna helicase",                   # broad helicase = replication
-               "dead/deah box helicase",         # caught as other before
+               "replicative dna helicase",
+               "helicase repa",
+               "dna helicase",
+               "dead/deah box helicase",
                "helicase family"]
     if any(k in pl for k in rep_kws):
         return "replication"
 
-    # 4. Terminase
+    # 5. Terminase
     ter_kws = ["terminase", "ters", "large subunit terminase",
                "small subunit terminase", "dna packaging",
                "packaging atpase", "headful packaging"]
     if any(k in combined for k in ter_kws):
         return "terminase"
 
-    # 5. Capsid
+    # 6. Capsid
     cap_kws = ["major capsid", "capsid", "head protein",
                "prohead", "portal protein", "portal"]
     if any(k in combined for k in cap_kws):
         return "capsid"
-
-    # 6. Integrase
-    int_kws = ["integrase", "recombinase", "tyrosine recombinase",
-               "serine recombinase", "site-specific recombinase",
-               "site-specific integrase",
-               "recombinase family",              # caught as other before
-               "tyrosine-type recombinase"]       # exact NCBI phrasing
-    if any(k in combined for k in int_kws):
-        return "integrase"
 
     # 7. Regulator
     reg_kws = ["alpa", "merr", "stl", "ci repressor", "cro", "cox",
@@ -306,7 +363,7 @@ def classify_gene(product: str, pfam_desc: str = None) -> str:
     if any(k in combined for k in reg_kws):
         return "regulator"
 
-    # 8. Putative replication — AAA domain (pfam only, broad)
+    # 8. Putative replication — AAA domain (pfam only, broad — last to avoid FPs)
     if "aaa" in fl:
         return "putative_replication"
 
