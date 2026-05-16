@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+pici_annotate_and_classify.py
+
 For each extracted PICI GBFF region:
   1. Run PFAM hmmscan (optional)
   2. Classify every CDS into a PICI module category
@@ -8,6 +10,7 @@ For each extracted PICI GBFF region:
   5. Draw a gene schematic with module colour coding
   6. Write per-group annotation TSVs
   7. Write a master summary TSV (one row per element) for downstream analysis
+
 """
 
 import argparse
@@ -70,33 +73,63 @@ COLOR_MAP = {
 # Architecture classification rules (evaluated in order, first match wins).
 # Each rule is (label, required_modules, forbidden_modules)
 ARCHITECTURE_RULES = [
+    # ── Complete elements ──────────────────────────────────────────────────────
     ("complete_canonical",
      {"integrase", "regulator", "replication", "terminase", "capsid"},
      set()),
+
+    # ── Packaging-positive (has terminase or capsid, no full replication) ──────
+    ("packaging_positive_partial",
+     {"integrase", "regulator", "terminase", "capsid"},
+     {"replication", "putative_replication"}),
     ("packaging_positive_partial",
      {"integrase", "regulator", "terminase"},
-     set()),
+     {"replication", "putative_replication"}),
     ("packaging_positive_partial",
      {"integrase", "regulator", "capsid"},
-     set()),
+     {"replication", "putative_replication"}),
+
+    # ── Replication + mobilisation (IME-like with replication) ────────────────
+    ("replication_mobilisation",
+     {"integrase", "regulator", "replication", "mobilisation"},
+     {"terminase", "capsid"}),
+    ("replication_mobilisation",
+     {"integrase", "regulator", "putative_replication", "mobilisation"},
+     {"terminase", "capsid"}),
+    ("replication_mobilisation",
+     {"integrase", "replication", "mobilisation"},
+     {"terminase", "capsid"}),
+
+    # ── Replication only (no packaging, no mobilisation) ──────────────────────
     ("backbone_replication_no_terminase",
      {"integrase", "regulator", "replication"},
-     {"terminase", "capsid"}),
+     {"terminase", "capsid", "mobilisation"}),
     ("backbone_replication_no_terminase",
      {"integrase", "regulator", "putative_replication"},
-     {"terminase", "capsid"}),
+     {"terminase", "capsid", "mobilisation"}),
+
+    # ── Mobilisation only (no replication, no packaging) ─────────────────────
+    ("mobilisation_associated",
+     {"integrase", "regulator", "mobilisation"},
+     {"replication", "putative_replication", "terminase", "capsid"}),
     ("mobilisation_associated",
      {"integrase", "mobilisation"},
-     set()),
+     {"replication", "putative_replication", "terminase", "capsid"}),
+
+    # ── Backbone only ─────────────────────────────────────────────────────────
     ("backbone_only",
      {"integrase", "regulator"},
      {"replication", "putative_replication", "terminase", "capsid", "mobilisation"}),
+
+    # ── Minimal/relic ─────────────────────────────────────────────────────────
     ("minimal_or_relic",
      {"integrase"},
      {"regulator", "replication", "putative_replication", "terminase", "capsid"}),
+
+    # ── Catch-all ─────────────────────────────────────────────────────────────
     ("partial_unclear",
      set(),
-     set()),   # catch-all
+     set()),
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,6 +152,10 @@ def parse_args():
     p.add_argument("--regraph", action="store_true",
                    help="Skip PFAM and classification. Read existing *_annotations.tsv "
                         "and master_completeness_summary.tsv and regenerate all plots only.")
+    p.add_argument("--reclassify", action="store_true",
+                   help="Re-run score_completeness() from existing *_annotations.tsv "
+                        "using updated ARCHITECTURE_RULES, overwrite TSVs, and replot. "
+                        "Use this after editing rules without re-running PFAM.")
     return p.parse_args()
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -211,17 +248,18 @@ def classify_gene(product: str, pfam_desc: str = None) -> str:
       8. Putative replication — AAA domain (pfam only, broad — placed last to avoid FPs)
       9. other
     """
-    pl = (product  or "").lower()
-    fl = (pfam_desc or "").lower()
+    pl = (str(product)   if product   and str(product)   != "nan" else "").lower()
+    fl = (str(pfam_desc) if pfam_desc and str(pfam_desc) != "nan" else "").lower()
     combined = pl + " " + fl
 
     # 1. Mobilisation
     mob_kws = ["mobiliz", "mobilis", "conjugat", "relaxase",
-               "type iv secretion", "trb", "mob protein", "tra "]
+               "type iv secretion", "trb", "mob protein", "tra ",
+               "vira", "virb", "virc", "vird"]
     if any(k in combined for k in mob_kws):
         return "mobilisation"
 
-    # 2. Exclude DNA repair (broad AAA / replication keywords can FP here)
+    # 2. Exclude DNA repair
     repair_kws = ["glycosylase", "dna repair", "excision repair",
                   "endonuclease", "resolvase", "recombination protein"]
     if any(k in fl for k in repair_kws):
@@ -230,7 +268,12 @@ def classify_gene(product: str, pfam_desc: str = None) -> str:
     # 3. Replication (product name takes priority over pfam)
     rep_kws = ["replication protein", "replicase", "primase",
                "replication initiator", "replication factor",
-               "rep protein", "repa", "dna replication"]
+               "rep protein", "repa", "dna replication",
+               "replicative dna helicase",       # caught as other before
+               "helicase repa",                  # RepA family helicases
+               "dna helicase",                   # broad helicase = replication
+               "dead/deah box helicase",         # caught as other before
+               "helicase family"]
     if any(k in pl for k in rep_kws):
         return "replication"
 
@@ -250,14 +293,16 @@ def classify_gene(product: str, pfam_desc: str = None) -> str:
     # 6. Integrase
     int_kws = ["integrase", "recombinase", "tyrosine recombinase",
                "serine recombinase", "site-specific recombinase",
-               "site-specific integrase"]
+               "site-specific integrase",
+               "recombinase family",              # caught as other before
+               "tyrosine-type recombinase"]       # exact NCBI phrasing
     if any(k in combined for k in int_kws):
         return "integrase"
 
     # 7. Regulator
     reg_kws = ["alpa", "merr", "stl", "ci repressor", "cro", "cox",
                "regulator", "repressor", "helix-turn-helix", "hth",
-               "transcriptional regulator"]
+               "transcriptional regulator", "luxr", "lux r"]
     if any(k in combined for k in reg_kws):
         return "regulator"
 
@@ -437,50 +482,46 @@ def plot_single(genes: list, name: str, comp: dict, output: str):
 def plot_group(all_records: list, names: list, completeness_list: list,
                output: str, title: str = "", batch_size: int = 30):
     """
-    Multi-element schematic. If there are more than batch_size elements,
-    the plot is split into pages/batches saved as output_batch1.png, etc.
-    For <=batch_size elements, saves to output directly.
+    Draw all elements in a single figure.
+    Scales DPI down automatically so the image never exceeds matplotlib's
+    65536-pixel height limit — no batching, one file per group.
     """
     n = len(all_records)
-    batches = [
-        (all_records[i:i+batch_size],
-         names[i:i+batch_size],
-         completeness_list[i:i+batch_size])
-        for i in range(0, n, batch_size)
+
+    # Each row gets 0.45 inches; add 1.8 for legend + title
+    row_h   = 0.45
+    fig_w   = 20
+    fig_h   = row_h * n + 1.8
+
+    # Compute safe DPI: keep pixel height under 65000
+    max_px  = 65000
+    dpi     = min(150, int(max_px / fig_h))
+    dpi     = max(dpi, 40)   # never go below 40 dpi — too blurry to read
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    max_len = _render_schematic(ax, all_records, names, completeness_list)
+
+    legend_patches = [
+        Patch(facecolor=COLOR_MAP[k], edgecolor="black", label=k)
+        for k in COLOR_MAP
     ]
+    ax.legend(handles=legend_patches,
+              loc="upper center", bbox_to_anchor=(0.5, 1.0),
+              ncol=min(8, len(COLOR_MAP)), fontsize=8, frameon=False)
 
-    base, ext = os.path.splitext(output)
+    xlim = min(max_len, MAX_PLOT_WIDTH) + 500
+    ax.set_xlim(-max(xlim * 0.30, 4000), xlim)
+    ax.set_ylim(0.2, n + 1.5)
+    ax.axis("off")
 
-    for b_idx, (recs, nms, comps) in enumerate(batches):
-        bn = len(recs)
-        fig_h = max(3.0, 0.5 * bn + 1.8)
-        fig, ax = plt.subplots(figsize=(20, fig_h))
+    if title:
+        ax.set_title(title, fontsize=10, pad=32)
 
-        max_len = _render_schematic(ax, recs, nms, comps)
-
-        legend_patches = [
-            Patch(facecolor=COLOR_MAP[k], edgecolor="black", label=k)
-            for k in COLOR_MAP
-        ]
-        ax.legend(handles=legend_patches,
-                  loc="upper center", bbox_to_anchor=(0.5, 1.0),
-                  ncol=min(8, len(COLOR_MAP)), fontsize=8, frameon=False)
-
-        xlim = min(max_len, MAX_PLOT_WIDTH) + 500
-        ax.set_xlim(-max(xlim * 0.30, 4000), xlim)
-        ax.set_ylim(0.2, bn + 1.5)
-        ax.axis("off")
-
-        batch_label = (f"{title} ({b_idx+1}/{len(batches)})"
-                       if len(batches) > 1 else title)
-        if batch_label:
-            ax.set_title(batch_label, fontsize=10, pad=32)
-
-        out = f"{base}_batch{b_idx+1}{ext}" if len(batches) > 1 else output
-        plt.tight_layout(rect=[0, 0, 1, 0.92])
-        plt.savefig(out, dpi=150, bbox_inches="tight")
-        plt.close()
-        yield out   # yield each saved path so the caller can report it
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(output, dpi=dpi, bbox_inches="tight")
+    plt.close()
+    yield output   # keep generator interface so callers don't need changing
 
 # ──────────────────────────────────────────────────────────────────────────────
 # OUTPUT WRITING
@@ -533,9 +574,13 @@ def discover_groups(base_dir: str) -> list[tuple[str, str, list]]:
       - base_dir/group_*/  *.gbff      (grouped layout)
       - base_dir/          *.gbff      (flat layout → one synthetic group "all")
     """
+    # Directories created by this script — never treat as groups
+    SKIP_DIRS = {"schematics", "by_architecture", "tmp", "__pycache__"}
+
     subdirs = [
         d for d in os.listdir(base_dir)
         if os.path.isdir(os.path.join(base_dir, d))
+        and d not in SKIP_DIRS
     ]
     groups = []
     for sub in sorted(subdirs):
@@ -544,7 +589,7 @@ def discover_groups(base_dir: str) -> list[tuple[str, str, list]]:
         if gbffs:
             groups.append((sub, path, gbffs))
 
-    # flat layout fallback
+    # flat layout fallback — GBFFs directly in base_dir
     if not groups:
         gbffs = sorted(glob.glob(os.path.join(base_dir, "*.gbff")))
         if gbffs:
@@ -864,12 +909,152 @@ def regraph_pipeline(args):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# RECLASSIFY PIPELINE  (--reclassify flag)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def reclassify_pipeline(args):
+    """
+    Read existing *_annotations.tsv files, re-run score_completeness() with
+    the current ARCHITECTURE_RULES, overwrite the completeness TSVs and master
+    summary, then regenerate all plots.
+    No PFAM, no GBFF parsing — only the classification and plotting steps run.
+    """
+    from collections import defaultdict
+
+    base_dir = args.gbff_dir
+    out_root = args.outdir or base_dir
+    os.makedirs(out_root, exist_ok=True)
+
+    groups = discover_groups(base_dir)
+    if not groups:
+        print(f"No subdirectories with GBFFs found under {base_dir}")
+        sys.exit(1)
+
+    master_names        = []
+    master_completeness = []
+    all_name_to_genes   = {}
+
+    for group_name, group_path, _ in groups:
+        ann_tsv = os.path.join(group_path, f"{group_name}_annotations.tsv")
+        if not os.path.exists(ann_tsv):
+            for alt in ["all_annotations.tsv", "annotations.tsv"]:
+                candidate = os.path.join(group_path, alt)
+                if os.path.exists(candidate):
+                    ann_tsv = candidate
+                    break
+        if not os.path.exists(ann_tsv):
+            print(f"  [WARN] No annotations TSV found in {group_path} — skipping")
+            continue
+
+        print(f"\n── {group_name} ──")
+        ann_df = pd.read_csv(ann_tsv, sep="\t")
+
+        group_records      = []
+        group_names        = []
+        group_completeness = []
+
+        for element_name, edf in ann_df.groupby("Genome"):
+            genes = edf.to_dict("records")
+            for g in genes:
+                g["start"]  = int(g["start"])
+                g["end"]    = int(g["end"])
+                g["strand"] = int(g["strand"])
+                # RE-CLASSIFY from product + pfam_desc using updated keywords
+                # Do NOT trust the class column from the old TSV
+                g["class"] = classify_gene(
+                    g.get("product", ""),
+                    g.get("pfam_desc", "")
+                )
+
+            # ── Re-run completeness with current architecture rules ────────────
+            comp = score_completeness(genes)
+
+            group_records.append(genes)
+            group_names.append(element_name)
+            group_completeness.append(comp)
+            all_name_to_genes[element_name] = genes
+
+            master_names.append(f"{group_name}/{element_name}")
+            master_completeness.append(comp)
+
+            present = ", ".join(sorted(comp["modules_present"])) or "none"
+            print(f"  {element_name:50s}  {comp['architecture']:35s}  "
+                  f"score={comp['canonical_score']:.0%}  [{present}]")
+
+        # ── Overwrite annotation TSV with reclassified gene classes ─────────
+        save_annotation_table(ann_tsv, group_records, group_names)
+        print(f"  → {ann_tsv} (reclassified)")
+
+        # ── Overwrite per-group completeness TSV ──────────────────────────────
+        comp_tsv = os.path.join(group_path, f"{group_name}_completeness.tsv")
+        save_completeness_table(comp_tsv, group_names, group_completeness)
+        print(f"  → {comp_tsv} (updated)")
+
+        # ── Per-element schematics ────────────────────────────────────────────
+        singles_dir = os.path.join(group_path, "schematics")
+        os.makedirs(singles_dir, exist_ok=True)
+        for genes, name, comp in zip(group_records, group_names, group_completeness):
+            plot_single(genes, name, comp,
+                        os.path.join(singles_dir, f"{name}_schematic.png"))
+        print(f"  → {singles_dir}/ ({len(group_records)} schematics updated)")
+
+    # ── Overwrite master summary ──────────────────────────────────────────────
+    master_tsv = os.path.join(out_root, "master_completeness_summary.tsv")
+    save_completeness_table(master_tsv, master_names, master_completeness)
+    print(f"\n── Master summary → {master_tsv} (updated)")
+
+    # ── Architecture distribution ─────────────────────────────────────────────
+    arch_counts = {}
+    for c in master_completeness:
+        arch_counts[c["architecture"]] = arch_counts.get(c["architecture"], 0) + 1
+    print("\nArchitecture distribution:")
+    for arch, n in sorted(arch_counts.items(), key=lambda x: -x[1]):
+        print(f"  {arch:40s} {n:4d}")
+
+    # ── Architecture-grouped overview plots ───────────────────────────────────
+    arch_groups = defaultdict(list)
+    for full_name, comp in zip(master_names, master_completeness):
+        bare = full_name.split("/", 1)[-1]
+        arch_groups[comp["architecture"]].append(bare)
+
+    arch_dir = os.path.join(out_root, "by_architecture")
+    os.makedirs(arch_dir, exist_ok=True)
+    print("\nGenerating architecture-grouped plots:")
+
+    for arch, element_names in sorted(arch_groups.items()):
+        valid = [n for n in element_names if n in all_name_to_genes]
+        if not valid:
+            continue
+        recs  = [all_name_to_genes[n] for n in valid]
+        comps_arch = []
+        for n in valid:
+            # find matching comp from master list
+            idx = master_names.index(
+                next(mn for mn in master_names if mn.endswith(f"/{n}"))
+            )
+            comps_arch.append(master_completeness[idx])
+
+        out_png = os.path.join(arch_dir, f"{arch}_schematic.png")
+        out_pdf = os.path.join(arch_dir, f"{arch}_schematic.pdf")
+        saved = list(plot_group(recs, valid, comps_arch, out_png,
+                                title=f"{arch}  (n={len(valid)})"))
+        list(plot_group(recs, valid, comps_arch, out_pdf,
+                        title=f"{arch}  (n={len(valid)})"))
+        for p in saved:
+            print(f"  → {p}  [{len(valid)} elements]")
+
+    print("\nDone (reclassified from existing annotations — PFAM not re-run).")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.regraph:
+    if args.reclassify:
+        reclassify_pipeline(args)
+    elif args.regraph:
         regraph_pipeline(args)
     else:
         run_pipeline(args)
