@@ -68,6 +68,7 @@ python pici_annotate_and_classify.py pici_gbff_regions \
 | `--rerun-pfam` | — | Force re-run PFAM even if `.pfam` files exist |
 | `--outdir` | same as `gbff_dir` | Output directory for master summary and plots |
 | `--regraph` | — | Skip all computation, regenerate plots from existing TSVs |
+| `--reclassify` | - | Re-run gene classification and architecture scoring from existing annotation TSVs, overwrite TSVs and plots
 
 ---
 
