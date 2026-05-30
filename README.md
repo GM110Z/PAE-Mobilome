@@ -94,8 +94,10 @@ present, regardless of architecture class.
 **group-by-architecture.py**:Organise extracted GBFF files into subdirectories by architecture class
 using the master_completeness_summary.tsv produced by PICIasso.
 
+
 **pici-grouped-median-size.py**: Uses the output of group-by-architecture.py to calculate median size by groups from gbff files. 
 Runs as pici-grouped-median-size.py /folder/to/groups
+
 ----------------------------------------------------------------------------------------------------------------------------------------------------------
 # att-finder.py
 
