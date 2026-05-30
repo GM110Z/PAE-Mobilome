@@ -89,3 +89,45 @@ Elements are classified in the following priority order:
 The **canonical completeness score** (0–100%) reflects how many of the five
 canonical modules (integrase, regulator, replication, terminase, capsid) are
 present, regardless of architecture class.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# att-finder.py
+
+Att site detection for predicted MGEs using an attB-first approach.
+
+Instead of searching for direct repeats at element boundaries, this script uses DIAMOND to find the same chromosomal locus in PICI-negative genomes, extracts the empty integration site (attB) there, then identifies the att site by comparing attB to the element boundaries. 
+
+## Usage
+
+```bash
+# Step 1 — build DIAMOND database from negative genomes (once)
+python att_find_attB_first.py build \
+    --pa_matrix pici_pa_matrix.tsv \
+    --neg_gbff_dir /path/to/full/genomes \
+    --outdir att_attB \
+    --threads 8
+
+# Step 2 — find att sites
+python att_find_attB_first.py find \
+    --summary extraction_summary.tsv \
+    --gbff_dir pici_gbff_NEWregions \
+    --neg_gbff_dir /path/to/full/genomes \
+    --db_dir att_attB \
+    --completeness all_completeness.tsv \
+    --outdir att_attB \
+    --threads 8
+```
+
+## Dependencies
+```
+ diamond biopython pandas numpy matplotlib
+```
+
+## Outputs
+- `att_attB_results.tsv` — all elements with att site calls
+- `att_attB_found.tsv` — elements with att sites only
+- `att_by_architecture.tsv` — detection rate per architecture class
+- `att_summary.png` — length distribution and architecture summary plots
+- `att_alignments/` — attB/attL/attR alignments per confirmed element
