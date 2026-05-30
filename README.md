@@ -91,8 +91,9 @@ canonical modules (integrase, regulator, replication, terminase, capsid) are
 present, regardless of architecture class.
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
+**group-by-architecture.py**:Organise extracted GBFF files into subdirectories by architecture class
+using the master_completeness_summary.tsv produced by PICIasso.
+----------------------------------------------------------------------------------------------------------------------------------------------------------
 # att-finder.py
 
 Att site detection for predicted MGEs using an attB-first approach.
