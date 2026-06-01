@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 """
-pici_annotate_and_classify.py
 
-For each extracted PICI GBFF region:
-  1. Run PFAM hmmscan (optional)
-  2. Classify every CDS into a PICI module category
-  3. Score element completeness against a canonical PICI definition
-  4. Assign architecture class (complete_canonical, packaging_positive_partial, etc.)
-  5. Draw a gene schematic with module colour coding
-  6. Write per-group annotation TSVs
-  7. Write a master summary TSV (one row per element) for downstream analysis
 """
 
 import argparse
